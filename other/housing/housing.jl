@@ -88,6 +88,69 @@ function train(; kws...)
     err = meansquarederror(predict(x_test, m),y_test)
     println(err)
 end
+##===============mmy
+using DifferentialEquations, Plots
+## Setup ODE
+function lotka_volterra(du,u,p,t)
+  x, y = u
+  α, β, δ, γ = p
+  du[1] = dx = α*x - β*x*y
+  du[2] = dy = -δ*y + γ*x*y
+end
+u0 = [1.0,1.0]
+tspan = (0.0,10.0)
+p = [1.5,1.0,3.0,1.0]
+prob = ODEProblem(lotka_volterra,u0,tspan,p)
+# Verify ODE solution
+sol = solve(prob,Tsit5())
+plot(sol)
+
+# Generate data from the ODE
+sol = solve(prob,Tsit5(),saveat=0.1)
+A = sol[1,:] # length 101 vector
+t = 0:0.1:10.0
+scatter!(t,A)
+
+using Flux, DiffEqFlux
+# Build a neural network that sets the cost as the difference
+# from the generated data and 1
+p = [2.2, 1.0, 2.0, 0.4]
+p = Flux.params(p) # Initial Parameter Vector
+
+function predict_rd() # Our 1-layer neural network
+  diffeq_rd(p,prob,Tsit5(),saveat=0.1)[1,:]
+end
+loss_rd() = sum(abs2,x-1 for x in predict_rd()) # loss function
+
+# Optimize the parameters so the ODE's solution stays near 1
+data = Iterators.repeated((), 100)
+opt = ADAM(0.1)
+Flux.train!(loss_rd, [p], data, opt, cb = cb)
+
+##=====Poisson
+using NeuralPDE, Flux, ModelingToolkit, GalacticOptim, Optim, DiffEqFlux
+@parameters x y
+@variables u(..)
+Dxx = Differential(x)^2
+Dyy = Differential(y)^2
+# 2D PDE
+eq  = Dxx(u(x,y)) + Dyy(u(x,y)) ~ -sin(pi*x)*sin(pi*y)
+# Boundary conditions
+bcs = [u(0,y) ~ 0.f0, u(1,y) ~ -sin(pi*1)*sin(pi*y),
+       u(x,0) ~ 0.f0, u(x,1) ~ -sin(pi*x)*sin(pi*1)]
+# Space and time domains
+domains = [x ∈ IntervalDomain(0.0,1.0), y ∈ IntervalDomain(0.0,1.0)]
+# Discretization
+dx = 0.1
+# Neural network
+dim = 2 # number of dimensions
+chain = FastChain(FastDense(dim,16,Flux.σ),FastDense(16,16,Flux.σ),
+                  FastDense(16,1))
+discret = PhysicsInformedNN(chain, GridTraining(dx)) # PINNs model
+pde_system = PDESystem(eq,bcs,domains,[x,y],[u])
+prob = discretize(pde_system,discret)
+res = GalacticOptim.solve(prob, Optim.BFGS(); maxiters=1000)
+phi = discret.phi
 
 cd(@__DIR__)
 train()
